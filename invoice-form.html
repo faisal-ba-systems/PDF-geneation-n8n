@@ -175,24 +175,13 @@
       }
 
       const data = await res.json();
+      statusEl.textContent = 'Done.';
+      statusEl.className = '';
 
       if (data.pdf_url) {
-        statusEl.textContent = 'Fetching PDF...';
         const fileName = data.pdf_url.split('/').pop();
-        const pdfRes = await fetch(data.pdf_url);
-        if (!pdfRes.ok) throw new Error(`Could not fetch PDF (${pdfRes.status})`);
-        const blob = await pdfRes.blob();
-        const blobUrl = URL.createObjectURL(blob);
-
-        resultEl.innerHTML = `
-          <a href="${blobUrl}" download="${fileName}">Download ${fileName}</a>
-          <iframe src="${blobUrl}"></iframe>
-        `;
-        statusEl.textContent = 'Done.';
-        statusEl.className = '';
+        resultEl.innerHTML = `<a href="${data.pdf_url}" target="_blank" rel="noopener">View PDF: ${fileName}</a>`;
       } else {
-        statusEl.textContent = 'Done.';
-        statusEl.className = '';
         resultEl.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
       }
     } catch (err) {
