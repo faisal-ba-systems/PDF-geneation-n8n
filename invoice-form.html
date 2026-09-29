@@ -60,6 +60,12 @@
     border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;
   }
   #result a:hover { background: #196a2b; }
+  #result a.download-link { background: #1a4d8f; }
+  #result a.download-link:hover { background: #153e73; }
+  #result .result-links { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  #result .generated-at { margin-top: 8px; font-size: 13px; color: #445; }
+  #result .file-name { font-size: 13px; color: #667; word-break: break-all; }
+  #result pre { background: #f4f6f8; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12px; }
   #result iframe { width: 100%; height: 480px; border: 1px solid #d3d9de; border-radius: 6px; margin-top: 12px; }
   .webhook-url { margin-top: 22px; }
   .webhook-url small { color: #667; }
@@ -82,10 +88,10 @@
   </div>
 
   <label>Customer Name</label>
-  <input type="text" id="customerName" value="Imran Ahmed">
+  <input type="text" id="customerName" value="Faisal Ahmed">
 
   <label>Customer Address</label>
-  <input type="text" id="customerAddress" value="Rajshahi, Bangladesh">
+  <input type="text" id="customerAddress" value="Dhaka, Bangladesh">
 
   <div class="items-header">
     <div>Item</div><div>Qty</div><div>Price</div><div></div>
@@ -109,6 +115,86 @@
 
 <script>
   const itemsEl = document.getElementById('items');
+
+  // n8n may return { pdf_url }, [{ pdf_url }], { json: { pdf_url } } or a plain URL string.
+  function extractPdfUrl(data) {
+    if (!data) return null;
+    if (typeof data === 'string') {
+      const match = data.match(/https?:\/\/\S+?\.pdf/i);
+      return match ? match[0] : null;
+    }
+    if (Array.isArray(data)) {
+      for (const entry of data) {
+        const url = extractPdfUrl(entry);
+        if (url) return url;
+      }
+      return null;
+    }
+    if (typeof data === 'object') {
+      if (typeof data.pdf_url === 'string') return data.pdf_url;
+      for (const value of Object.values(data)) {
+        const url = extractPdfUrl(value);
+        if (url) return url;
+      }
+    }
+    return null;
+  }
+
+  // File names end with the generation time in ms, e.g. INV-1011-1790671049805.pdf
+  function generatedAtFromFileName(fileName) {
+    const match = fileName.match(/-(\d{13})\.pdf$/i);
+    return match ? new Date(Number(match[1])) : new Date();
+  }
+
+  function formatTimestamp(date) {
+    return date.toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+  }
+
+  function showPdf(pdfUrl) {
+    const resultEl = document.getElementById('result');
+    const fileName = decodeURIComponent(pdfUrl.split('/').pop());
+    const generatedAt = generatedAtFromFileName(fileName);
+    resultEl.innerHTML = `
+      <div class="result-links">
+        <a class="view-link" target="_blank" rel="noopener">View PDF</a>
+        <a class="download-link" download>Download PDF</a>
+        <span class="file-name"></span>
+      </div>
+      <div class="generated-at"></div>
+      <iframe title="Invoice PDF preview"></iframe>
+    `;
+    resultEl.querySelector('.view-link').href = pdfUrl;
+    resultEl.querySelector('.file-name').textContent = fileName;
+    const generatedEl = resultEl.querySelector('.generated-at');
+    generatedEl.textContent = 'Generated: ' + formatTimestamp(generatedAt);
+    generatedEl.title = generatedAt.toISOString();
+    resultEl.querySelector('iframe').src = pdfUrl;
+
+    const downloadLink = resultEl.querySelector('.download-link');
+    downloadLink.href = pdfUrl;
+    downloadLink.download = fileName;
+    // The download attribute is ignored for cross-origin URLs, so fetch the file as a blob first.
+    downloadLink.addEventListener('click', async (e) => {
+      e.preventDefault();
+      try {
+        const res = await fetch(pdfUrl);
+        if (!res.ok) throw new Error(res.status);
+        const blobUrl = URL.createObjectURL(await res.blob());
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+      } catch {
+        window.open(pdfUrl, '_blank', 'noopener');
+      }
+    });
+  }
 
   function addItemRow(name = '', qty = 1, price = 0) {
     const row = document.createElement('div');
@@ -150,7 +236,8 @@
         name: document.getElementById('customerName').value.trim(),
         address: document.getElementById('customerAddress').value.trim()
       },
-      items
+      items,
+      generated_at: new Date().toISOString()
     };
 
     if (!payload.invoice_no || !payload.customer.name || items.some(i => !i.name)) {
@@ -174,16 +261,22 @@
         throw new Error(`Server responded with ${res.status}`);
       }
 
-      const data = await res.json();
+      const raw = await res.text();
+      let data;
+      try { data = JSON.parse(raw); } catch { data = raw; }
+
+      const pdfUrl = extractPdfUrl(data);
+      if (!pdfUrl) {
+        statusEl.textContent = 'PDF generated, but no pdf_url found in the response.';
+        statusEl.className = 'error';
+        resultEl.innerHTML = '<pre></pre>';
+        resultEl.querySelector('pre').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+        return;
+      }
+
       statusEl.textContent = 'Done.';
       statusEl.className = '';
-
-      if (data.pdf_url) {
-        const fileName = data.pdf_url.split('/').pop();
-        resultEl.innerHTML = `<a href="${data.pdf_url}" target="_blank" rel="noopener">View PDF: ${fileName}</a>`;
-      } else {
-        resultEl.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
-      }
+      showPdf(pdfUrl);
     } catch (err) {
       statusEl.textContent = 'Error: ' + err.message;
       statusEl.className = 'error';
