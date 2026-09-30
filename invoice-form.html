@@ -116,36 +116,6 @@
 <script>
   const itemsEl = document.getElementById('items');
 
-  // n8n may return { pdf_url }, [{ pdf_url }], { json: { pdf_url } } or a plain URL string.
-  function extractPdfUrl(data) {
-    if (!data) return null;
-    if (typeof data === 'string') {
-      const match = data.match(/https?:\/\/\S+?\.pdf/i);
-      return match ? match[0] : null;
-    }
-    if (Array.isArray(data)) {
-      for (const entry of data) {
-        const url = extractPdfUrl(entry);
-        if (url) return url;
-      }
-      return null;
-    }
-    if (typeof data === 'object') {
-      if (typeof data.pdf_url === 'string') return data.pdf_url;
-      for (const value of Object.values(data)) {
-        const url = extractPdfUrl(value);
-        if (url) return url;
-      }
-    }
-    return null;
-  }
-
-  // File names end with the generation time in ms, e.g. INV-1011-1790671049805.pdf
-  function generatedAtFromFileName(fileName) {
-    const match = fileName.match(/-(\d{13})\.pdf$/i);
-    return match ? new Date(Number(match[1])) : new Date();
-  }
-
   function formatTimestamp(date) {
     return date.toLocaleString(undefined, {
       year: 'numeric', month: 'short', day: '2-digit',
@@ -153,47 +123,43 @@
     });
   }
 
-  function showPdf(pdfUrl) {
+  // Content-Disposition is only readable if n8n exposes it via CORS; otherwise returns null.
+  function fileNameFromResponse(res) {
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  function isPdf(bytes) {
+    // every PDF starts with "%PDF"
+    return bytes.length >= 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
+  }
+
+  let currentPdfUrl = null;
+
+  function showPdf(blob, fileName, generatedAt) {
+    if (currentPdfUrl) URL.revokeObjectURL(currentPdfUrl);
+    currentPdfUrl = URL.createObjectURL(blob);
+
     const resultEl = document.getElementById('result');
-    const fileName = decodeURIComponent(pdfUrl.split('/').pop());
-    const generatedAt = generatedAtFromFileName(fileName);
     resultEl.innerHTML = `
       <div class="result-links">
         <a class="view-link" target="_blank" rel="noopener">View PDF</a>
-        <a class="download-link" download>Download PDF</a>
+        <a class="download-link">Download PDF</a>
         <span class="file-name"></span>
       </div>
       <div class="generated-at"></div>
       <iframe title="Invoice PDF preview"></iframe>
     `;
-    resultEl.querySelector('.view-link').href = pdfUrl;
+    resultEl.querySelector('.view-link').href = currentPdfUrl;
     resultEl.querySelector('.file-name').textContent = fileName;
+    const downloadLink = resultEl.querySelector('.download-link');
+    downloadLink.href = currentPdfUrl;
+    downloadLink.download = fileName;
     const generatedEl = resultEl.querySelector('.generated-at');
     generatedEl.textContent = 'Generated: ' + formatTimestamp(generatedAt);
     generatedEl.title = generatedAt.toISOString();
-    resultEl.querySelector('iframe').src = pdfUrl;
-
-    const downloadLink = resultEl.querySelector('.download-link');
-    downloadLink.href = pdfUrl;
-    downloadLink.download = fileName;
-    // The download attribute is ignored for cross-origin URLs, so fetch the file as a blob first.
-    downloadLink.addEventListener('click', async (e) => {
-      e.preventDefault();
-      try {
-        const res = await fetch(pdfUrl);
-        if (!res.ok) throw new Error(res.status);
-        const blobUrl = URL.createObjectURL(await res.blob());
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        a.download = fileName;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-      } catch {
-        window.open(pdfUrl, '_blank', 'noopener');
-      }
-    });
+    resultEl.querySelector('iframe').src = currentPdfUrl;
   }
 
   function addItemRow(name = '', qty = 1, price = 0) {
@@ -261,22 +227,21 @@
         throw new Error(`Server responded with ${res.status}`);
       }
 
-      const raw = await res.text();
-      let data;
-      try { data = JSON.parse(raw); } catch { data = raw; }
-
-      const pdfUrl = extractPdfUrl(data);
-      if (!pdfUrl) {
-        statusEl.textContent = 'PDF generated, but no pdf_url found in the response.';
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (!isPdf(bytes)) {
+        // n8n sent something other than a PDF (e.g. a JSON error) - show it
+        statusEl.textContent = 'The webhook did not return a PDF.';
         statusEl.className = 'error';
         resultEl.innerHTML = '<pre></pre>';
-        resultEl.querySelector('pre').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+        resultEl.querySelector('pre').textContent = new TextDecoder().decode(bytes).slice(0, 2000);
         return;
       }
 
+      const generatedAt = new Date();
+      const fileName = fileNameFromResponse(res) || `${payload.invoice_no}-${generatedAt.getTime()}.pdf`;
       statusEl.textContent = 'Done.';
       statusEl.className = '';
-      showPdf(pdfUrl);
+      showPdf(new Blob([bytes], { type: 'application/pdf' }), fileName, generatedAt);
     } catch (err) {
       statusEl.textContent = 'Error: ' + err.message;
       statusEl.className = 'error';

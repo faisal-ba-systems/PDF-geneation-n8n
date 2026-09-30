@@ -5,20 +5,11 @@ services:
     ports: ["5678:5678"]
     environment:
       - WEBHOOK_URL=http://localhost:5678/
-      - N8N_RESTRICT_FILE_ACCESS_TO=/files
     volumes:
       - n8n_data:/home/node/.n8n
-      - ./pdfs:/files # n8n writes PDFs here
 
   gotenberg:
     image: gotenberg/gotenberg:8 # internal URL: http://gotenberg:3000
-
-  files:
-    image: nginx:alpine
-    ports: ["8080:80"]
-    volumes:
-      - ./pdfs:/usr/share/nginx/html:ro # serves the same folder
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro # CORS so the form can download PDFs
 
 volumes:
   n8n_data:
